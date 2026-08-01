@@ -27,15 +27,15 @@ self.addEventListener("activate", (e) => {
   self.clients.claim();
 });
 
-// Network-first
+// Prioridade à rede
 self.addEventListener("fetch", (e) => {
-  if (e.request.method !== "GET") return;
+  Se (e.request.method !== "GET") retornar;
   e.respondWith(
-    fetch(e.request)
+    buscar(e.request)
       .then((res) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
-        return res;
+        retornar res;
       })
       .catch(() => caches.match(e.request).then((r) => r || caches.match("./index.html")))
   );
