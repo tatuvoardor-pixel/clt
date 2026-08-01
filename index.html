@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#060a14" />
+  <meta name="description" content="Calculadora de salário CLT para turno noturno 18h-06h. Adicional noturno, periculosidade, horas extras, INSS e IRRF 2026." />
+  <title>Calculadora CLT Noturna</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="CLT Noturna" />
+
+  <!-- React + Babel (CDN) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: #060a14; -webkit-tap-highlight-color: transparent; }
+    body { font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+    #root { min-height: 100vh; }
+    .loading { display:flex; align-items:center; justify-content:center; min-height:100vh; color:#475569; font-size:14px; }
+  </style>
+</head>
+<body>
+  <div id="root"><div class="loading">🌙 Carregando…</div></div>
+
+  <script type="text/babel" data-type="module">
+
+const fmt = (n) =>
+  typeof n === "number" && !isNaN(n)
+    ? n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
+    : "—";
+
+// CLT Art. 73 §1 — hora noturna reduzida = 52min30s
+// Turno 18h→06h:
+//   18h–22h : 4h diurnas
+//   22h–05h : 7h reais → 7 × (60/52.5) ≈ 8h pagas
+//   05h–06h : 1h diurna
+//   Total   : ~13h pagas por plantão
+const FATOR_HN = 60 / 52.5;
+const H_DIU = 5;      // 4h pré + 1h pós
+const H_NOT_REAL = 7; // 22h–05h
+const H_NOT_PAG  = +(H_NOT_REAL * FATOR_HN).toFixed(4); // ≈8h
+const H_TURNO    = H_DIU + H_NOT_PAG; // ≈13h
+
+function calcINSS(sal) {
+  const faixas = [[1621,0.075],[2902.84,0.09],[4354.27,0.12],[8475.55,0.14]];
+  let v = 0, ant = 0;
+  for (const [lim,alq] of faixas) {
+    const b = Math.min(sal,lim) - ant;
+    if (b <= 0) break;
+    v += b * alq; ant = lim;
+    if (sal <= lim) break;
+  }
+  return Math.round(v * 100) / 100;
+}
+
+function calcIRRF(base, bruto) {
+  let n = 0;
+  if      (base <= 2824)    n = 0;
+  else if (base <= 3751.05) n = base*0.075 - 211.80;
+  else if (base <= 4664.68) n = base*0.15  - 529.83;
+  else if (base <= 5996)    n = base*0.225 - 879.97;
+  else                      n = base*0.275 - 1179.73;
+  const desc = Math.max(0, 978.62 - 0.133145 * bruto);
+  return Math.round(Math.max(0, n - desc) * 100) / 100;
+}
+
+const parseBRL = (s) => {
+  if (!s) return 0;
+  return parseFloat(s.replace(/\./g,"").replace(",",".")) || 0;
+};
+
+const ESCALAS = [
+  { id:"2x2",   label:"2×2",   days:15 },
+  { id:"12x36", label:"12×36", days:15 },
+  { id:"5x2",   label:"5×2",   days:22 },
+  { id:"6x1",   label:"6×1",   days:26 },
+  { id:"custom",label:"Outro", days:null },
+];
+
+function App() {
+  const [salBase,  setSalBase]  = React.useState("");
+  const [escala,   setEscala]   = React.useState("2x2");
+  const [diasCust, setDiasCust] = React.useState("15");
+  const [adic,     setAdic]     = React.useState("40");
+  const [dep,      setDep]      = React.useState("0");
+  const [showEmp,  setShowEmp]  = React.useState(false);
+  const [showHE,   setShowHE]   = React.useState(false);
+  const [he50,     setHe50]     = React.useState("");  // horas extras 50%
+  const [he100,    setHe100]    = React.useState(""); // horas extras 100%
+  const [he50pct,  setHe50pct]  = React.useState("50");
+  const [he100pct, setHe100pct] = React.useState("100");
+  const [peric,    setPeric]    = React.useState(false); // periculosidade 30%
+
+  const dias = escala === "custom"
+    ? (parseInt(diasCust)||0)
+    : ESCALAS.find(e=>e.id===escala).days;
+
+  const calc = React.useMemo(() => {
+    const base  = parseBRL(salBase);
+    const adicP = (parseFloat(adic)||40)/100;
+    const deps  = parseInt(dep)||0;
+    if (!base || !dias) return null;
+
+    const hNotMes = +(H_NOT_PAG * dias).toFixed(2);
+    const hTotMes = +(H_TURNO  * dias).toFixed(2);
+
+    // Periculosidade: 30% sobre o salário base (CLT Art. 193)
+    // Integra a base de cálculo do adicional noturno e horas extras
+    const pericVal = peric ? base * 0.30 : 0;
+    const baseCalc = base + pericVal; // base para hora/adicionais
+
+    const vH      = baseCalc / hTotMes;
+    const adicVal = hNotMes * vH * adicP;
+
+    // Horas extras (somam-se ao bruto, calculadas sobre a hora com periculosidade)
+    const h50  = parseFloat(he50)  || 0;
+    const h100 = parseFloat(he100) || 0;
+    const p50  = (parseFloat(he50pct)  || 50)  / 100;
+    const p100 = (parseFloat(he100pct) || 100) / 100;
+    const valHE50  = h50  * vH * (1 + p50);
+    const valHE100 = h100 * vH * (1 + p100);
+    const valHE = valHE50 + valHE100;
+
+    const bruto   = base + pericVal + adicVal + valHE;
+    const inss    = calcINSS(bruto);
+    const baseIR  = Math.max(0, bruto - inss - deps*189.59);
+    const irrf    = calcIRRF(baseIR, bruto);
+    const liq     = bruto - inss - irrf;
+    const v15     = Math.round(base * 0.4 * 100) / 100;
+    const v30     = Math.round(Math.max(0, liq - v15) * 100) / 100;
+
+    const fgts     = Math.round(bruto*0.08  *100)/100;
+    const inssPat  = Math.round(bruto*0.20  *100)/100;
+    const rat      = Math.round(bruto*0.02  *100)/100;
+    const sistS    = Math.round(bruto*0.058 *100)/100;
+    const prov13   = Math.round(bruto*0.0833*100)/100;
+    const provFer  = Math.round(bruto*0.1111*100)/100;
+    const totalEnc = fgts+inssPat+rat+sistS;
+    const totalProv= prov13+provFer;
+    const custo    = bruto+totalEnc+totalProv;
+
+    return {
+      hNotMes, hTotMes, vH, vHNot: vH*(1+adicP),
+      adicVal, bruto, inss, irrf, liq, v15, v30,
+      fgts, inssPat, rat, sistS, prov13, provFer,
+      totalEnc, totalProv, custo,
+      h50, h100, valHE50, valHE100, valHE, pericVal,
+    };
+  }, [salBase, dias, adic, dep, he50, he100, he50pct, he100pct, peric]);
+
+  // ── estilos ────────────────────────────────────────────────────────────────
+  const inp = {
+    background:"#1e293b", border:"1px solid #334155", borderRadius:"10px",
+    color:"#f8fafc", padding:"13px 14px", fontSize:"17px",
+    width:"100%", boxSizing:"border-box", outline:"none", fontFamily:"inherit",
+  };
+  const card = (ex={}) => ({
+    background:"#0f172a", borderRadius:"14px", padding:"18px 16px",
+    marginBottom:"10px", border:"1px solid #1e293b", ...ex,
+  });
+  const lbl = {
+    display:"block", fontSize:"11px", color:"#64748b",
+    fontWeight:700, letterSpacing:".06em", textTransform:"uppercase", marginBottom:"6px",
+  };
+  const row = (last=false) => ({
+    display:"flex", justifyContent:"space-between", alignItems:"flex-start",
+    padding:"12px 0", borderBottom: last?"none":"1px solid #1e293b", gap:"8px",
+  });
+  const sec = {
+    fontSize:"10px", fontWeight:800, color:"#475569",
+    letterSpacing:".1em", textTransform:"uppercase", marginBottom:"14px", margin:"0 0 14px",
+  };
+  const pill = (color) => ({
+    fontSize:"9px", fontWeight:800,
+    background:color+"22", color, border:`1px solid ${color}44`,
+    borderRadius:"999px", padding:"2px 7px", marginLeft:"5px", display:"inline-block",
+  });
+
+  return (
+    <div style={{
+      background:"#060a14", minHeight:"100vh", color:"#e2e8f0",
+      fontFamily:"system-ui,-apple-system,'Segoe UI',sans-serif",
+      padding:"16px 14px 24px", maxWidth:"480px", margin:"0 auto",
+      boxSizing:"border-box",
+    }}>
+
+      {/* Header */}
+      <div style={{textAlign:"center", marginBottom:"18px"}}>
+        <div style={{fontSize:"30px", marginBottom:"4px"}}>🌙</div>
+        <h1 style={{fontSize:"20px", fontWeight:900, color:"#f8fafc", margin:"0 0 3px"}}>
+          Calculadora CLT Noturna
+        </h1>
+        <p style={{fontSize:"12px", color:"#475569", margin:0}}>
+          Turno 18h → 06h · CLT Art. 73 · 2026
+        </p>
+      </div>
+
+      {/* ── Dados ── */}
+      <div style={card()}>
+        <p style={sec}>⚙️ Seus Dados</p>
+
+        <div style={{marginBottom:"14px"}}>
+          <label style={lbl}>Salário Base (R$)</label>
+          <input style={inp} type="text" inputMode="decimal"
+            placeholder="Ex: 2.990,99"
+            value={salBase} onChange={e=>setSalBase(e.target.value)} />
+        </div>
+
+        {/* Escala */}
+        <div style={{marginBottom:"14px"}}>
+          <label style={lbl}>Escala de Trabalho</label>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"6px", marginBottom:"6px"}}>
+            {ESCALAS.slice(0,3).map(e=>(
+              <button key={e.id} onClick={()=>setEscala(e.id)} style={{
+                padding:"12px 6px", borderRadius:"8px", cursor:"pointer",
+                border:`2px solid ${escala===e.id?"#818cf8":"#1e293b"}`,
+                background:escala===e.id?"#1e1b4b":"#1e293b",
+                color:escala===e.id?"#c4b5fd":"#64748b",
+                fontSize:"14px", fontWeight:800,
+              }}>{e.label}</button>
+            ))}
+          </div>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:"6px"}}>
+            {ESCALAS.slice(3).map(e=>(
+              <button key={e.id} onClick={()=>setEscala(e.id)} style={{
+                padding:"12px 6px", borderRadius:"8px", cursor:"pointer",
+                border:`2px solid ${escala===e.id?"#818cf8":"#1e293b"}`,
+                background:escala===e.id?"#1e1b4b":"#1e293b",
+                color:escala===e.id?"#c4b5fd":"#64748b",
+                fontSize:"14px", fontWeight:800,
+              }}>{e.label}</button>
+            ))}
+          </div>
+          {escala==="custom" && (
+            <input style={{...inp, marginTop:"8px"}} type="number"
+              placeholder="Quantos dias por mês?"
+              value={diasCust} onChange={e=>setDiasCust(e.target.value)} />
+          )}
+          <p style={{fontSize:"11px", color:"#475569", margin:"6px 0 0"}}>
+            {ESCALAS.find(e=>e.id===escala)?.id !== "custom"
+              ? `${dias} dias/mês · ${(H_TURNO * (dias||0)).toFixed(1)}h pagas/mês`
+              : `${dias||"?"} dias/mês`}
+          </p>
+        </div>
+
+        {/* Adicional + Dependentes */}
+        <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"10px"}}>
+          <div>
+            <label style={lbl}>Adic. Noturno %</label>
+            <input style={inp} type="number" value={adic}
+              onChange={e=>setAdic(e.target.value)} />
+            <p style={{fontSize:"10px", color:"#334155", margin:"4px 0 0"}}>Mín. legal: 20%</p>
+          </div>
+          <div>
+            <label style={lbl}>Dependentes IR</label>
+            <input style={inp} type="number" min="0" value={dep}
+              onChange={e=>setDep(e.target.value)} />
+            <p style={{fontSize:"10px", color:"#334155", margin:"4px 0 0"}}>–R$ 189,59/dep</p>
+          </div>
+        </div>
+
+        {/* Toggle Periculosidade */}
+        <button onClick={()=>setPeric(v=>!v)} style={{
+          width:"100%", marginTop:"14px", padding:"12px 14px",
+          borderRadius:"10px", cursor:"pointer",
+          border:`2px solid ${peric?"#ef4444":"#1e293b"}`,
+          background: peric ? "#1a0808" : "#1e293b",
+          display:"flex", alignItems:"center", justifyContent:"space-between", gap:"10px",
+        }}>
+          <div style={{textAlign:"left"}}>
+            <div style={{fontSize:"14px", fontWeight:800,
+              color: peric ? "#f87171" : "#94a3b8"}}>
+              ⚡ Periculosidade (30%)
+            </div>
+            <div style={{fontSize:"10px", color: peric ? "#991b1b" : "#334155", marginTop:"2px"}}>
+              CLT Art. 193 · sobre o salário base
+            </div>
+          </div>
+          <div style={{
+            width:"44px", height:"26px", borderRadius:"999px", flexShrink:0,
+            background: peric ? "#ef4444" : "#334155",
+            position:"relative", transition:"background .2s",
+          }}>
+            <div style={{
+              position:"absolute", top:"3px", left: peric ? "21px" : "3px",
+              width:"20px", height:"20px", borderRadius:"50%",
+              background:"#fff", transition:"left .2s",
+            }}/>
+          </div>
+        </button>
+
+        {/* Botão Hora Extra */}
+        <button onClick={()=>setShowHE(v=>!v)} style={{
+          width:"100%", marginTop:"14px", padding:"12px",
+          borderRadius:"10px", cursor:"pointer",
+          border:`2px solid ${showHE?"#f59e0b":"#1e293b"}`,
+          background: showHE ? "#150f00" : "#1e293b",
+          color: showHE ? "#fbbf24" : "#94a3b8",
+          fontSize:"14px", fontWeight:800,
+          display:"flex", alignItems:"center", justifyContent:"center", gap:"8px",
+        }}>
+          ⏱️ {showHE ? "Ocultar Hora Extra" : "+ Hora Extra"}
+        </button>
+
+        {showHE && (
+          <div style={{
+            marginTop:"12px", padding:"14px", background:"#0a0f1e",
+            borderRadius:"10px", border:"1px solid #1e2d40",
+          }}>
+            {/* 50% */}
+            <div style={{marginBottom:"12px"}}>
+              <label style={lbl}>Horas Extras 50% <span style={{color:"#334155", fontWeight:400, textTransform:"none"}}>(dias normais)</span></label>
+              <div style={{display:"grid", gridTemplateColumns:"1fr 80px", gap:"8px"}}>
+                <input style={inp} type="number" min="0" placeholder="Horas no mês"
+                  value={he50} onChange={e=>setHe50(e.target.value)} />
+                <div style={{position:"relative"}}>
+                  <input style={{...inp, paddingRight:"24px", textAlign:"center"}}
+                    type="number" min="0" value={he50pct}
+                    onChange={e=>setHe50pct(e.target.value)} />
+                  <span style={{position:"absolute", right:"10px", top:"50%",
+                    transform:"translateY(-50%)", fontSize:"13px", color:"#64748b", pointerEvents:"none"}}>%</span>
+                </div>
+              </div>
+            </div>
+
+            {/* 100% */}
+            <div>
+              <label style={lbl}>Horas Extras 100% <span style={{color:"#334155", fontWeight:400, textTransform:"none"}}>(domingos/feriados)</span></label>
+              <div style={{display:"grid", gridTemplateColumns:"1fr 80px", gap:"8px"}}>
+                <input style={inp} type="number" min="0" placeholder="Horas no mês"
+                  value={he100} onChange={e=>setHe100(e.target.value)} />
+                <div style={{position:"relative"}}>
+                  <input style={{...inp, paddingRight:"24px", textAlign:"center"}}
+                    type="number" min="0" value={he100pct}
+                    onChange={e=>setHe100pct(e.target.value)} />
+                  <span style={{position:"absolute", right:"10px", top:"50%",
+                    transform:"translateY(-50%)", fontSize:"13px", color:"#64748b", pointerEvents:"none"}}>%</span>
+                </div>
+              </div>
+            </div>
+
+            <p style={{fontSize:"10px", color:"#334155", margin:"10px 0 0", lineHeight:1.5}}>
+              💡 % é o adicional sobre a hora normal. Padrão CLT: 50% em dias úteis, 100% aos domingos/feriados (verifique sua CCT).
+            </p>
+          </div>
+        )}
+      </div>
+
+      {calc ? (<>
+
+        {/* ── Líquido destaque ── */}
+        <div style={card({
+          background:"#071a10", border:"2px solid #14532d",
+          textAlign:"center", padding:"22px 16px",
+        })}>
+          <div style={{fontSize:"11px", fontWeight:800, color:"#4ade80",
+            letterSpacing:".1em", marginBottom:"8px"}}>
+            💰 SALÁRIO LÍQUIDO
+          </div>
+          <div style={{
+            fontSize:"clamp(24px, 8vw, 34px)", fontWeight:900, color:"#10b981",
+            fontFamily:"monospace", lineHeight:1, wordBreak:"break-all",
+          }}>
+            {fmt(calc.liq)}
+          </div>
+          <div style={{fontSize:"11px", color:"#166534", marginTop:"8px"}}>
+            {dias} dias/mês · {calc.hTotMes}h pagas
+          </div>
+        </div>
+
+        {/* ── Holerite ── */}
+        <div style={card()}>
+          <p style={sec}>📋 Holerite</p>
+
+          <div style={row()}>
+            <div style={{flex:1}}>
+              <div style={{fontSize:"14px"}}>Salário Base</div>
+              <div style={{fontSize:"11px", color:"#475569", marginTop:"2px"}}>
+                {calc.hTotMes}h pagas/mês · {fmt(calc.vH)}/h
+              </div>
+            </div>
+            <div style={{fontFamily:"monospace", fontWeight:700, fontSize:"15px", whiteSpace:"nowrap"}}>
+              {fmt(parseBRL(salBase))}
+            </div>
+          </div>
+
+          {calc.pericVal > 0 && (
+            <div style={row()}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:"14px", color:"#f87171"}}>
+                  + Periculosidade (30%)
+                </div>
+                <div style={{fontSize:"11px", color:"#475569", marginTop:"2px"}}>
+                  CLT Art. 193 · sobre salário base
+                </div>
+              </div>
+              <div style={{fontFamily:"monospace", fontWeight:700, fontSize:"15px", color:"#f87171", whiteSpace:"nowrap"}}>
+                +{fmt(calc.pericVal)}
+              </div>
+            </div>
+          )}
+
+          <div style={row()}>
+            <div style={{flex:1}}>
+              <div style={{fontSize:"14px", color:"#c4b5fd"}}>
+                + Adicional Noturno ({adic}%)
+              </div>
+              <div style={{fontSize:"11px", color:"#475569", marginTop:"2px"}}>
+                {calc.hNotMes}h noturnas/mês
+              </div>
+            </div>
+            <div style={{fontFamily:"monospace", fontWeight:700, fontSize:"15px", color:"#c4b5fd", whiteSpace:"nowrap"}}>
+              +{fmt(calc.adicVal)}
+            </div>
+          </div>
+
+          {calc.h50 > 0 && (
+            <div style={row()}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:"14px", color:"#fbbf24"}}>
+                  + Hora Extra ({he50pct}%)
+                </div>
+                <div style={{fontSize:"11px", color:"#475569", marginTop:"2px"}}>
+                  {calc.h50}h extras · dias normais
+                </div>
+              </div>
+              <div style={{fontFamily:"monospace", fontWeight:700, fontSize:"15px", color:"#fbbf24", whiteSpace:"nowrap"}}>
+                +{fmt(calc.valHE50)}
+              </div>
+            </div>
+          )}
+
+          {calc.h100 > 0 && (
+            <div style={row()}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:"14px", color:"#fb923c"}}>
+                  + Hora Extra ({he100pct}%)
+                </div>
+                <div style={{fontSize:"11px", color:"#475569", marginTop:"2px"}}>
+                  {calc.h100}h extras · domingo/feriado
+                </div>
+              </div>
+              <div style={{fontFamily:"monospace", fontWeight:700, fontSize:"15px", color:"#fb923c", whiteSpace:"nowrap"}}>
+                +{fmt(calc.valHE100)}
+              </div>
+            </div>
+          )}
+
+          {/* Bruto */}
+          <div style={{
+            display:"flex", justifyContent:"space-between", alignItems:"center",
+            padding:"11px 13px", background:"#131f35", borderRadius:"10px",
+            margin:"6px 0", border:"1px solid #1e3a5f", gap:"8px",
+          }}>
+            <span style={{fontWeight:700, fontSize:"14px"}}>= Salário Bruto</span>
+            <span style={{fontFamily:"monospace", fontWeight:800, fontSize:"17px", whiteSpace:"nowrap"}}>
+              {fmt(calc.bruto)}
+            </span>
+          </div>
+
+          <div style={row()}>
+            <div style={{flex:1}}>
+              <div style={{fontSize:"14px", color:"#f87171"}}>– INSS</div>
+              <div style={{fontSize:"11px", color:"#475569", marginTop:"2px"}}>
+                Tabela progressiva 2026
+              </div>
+            </div>
+            <div style={{fontFamily:"monospace", fontWeight:700, fontSize:"15px", color:"#f87171", whiteSpace:"nowrap"}}>
+              –{fmt(calc.inss)}
+            </div>
+          </div>
+
+          <div style={row(true)}>
+            <div style={{flex:1}}>
+              <div style={{fontSize:"14px", color: calc.irrf===0?"#4ade80":"#f87171"}}>
+                – IRRF
+                {calc.irrf===0 && (
+                  <span style={pill("#4ade80")}>ISENTO</span>
+                )}
+              </div>
+              <div style={{fontSize:"11px", color:"#475569", marginTop:"2px"}}>
+                {calc.irrf===0?"Lei 15.270/2025 — até R$ 5.000":"Tabela + Lei 15.270/2025"}
+              </div>
+            </div>
+            <div style={{fontFamily:"monospace", fontWeight:700, fontSize:"15px",
+              color: calc.irrf===0?"#4ade80":"#f87171", whiteSpace:"nowrap"}}>
+              {calc.irrf===0?"R$ 0,00":`–${fmt(calc.irrf)}`}
+            </div>
+          </div>
+
+          {/* Líquido final */}
+          <div style={{
+            display:"flex", justifyContent:"space-between", alignItems:"center",
+            padding:"13px 14px", background:"#052e16", borderRadius:"12px",
+            marginTop:"10px", border:"1px solid #14532d", gap:"8px",
+          }}>
+            <div>
+              <div style={{fontSize:"12px", fontWeight:800, color:"#4ade80",
+                letterSpacing:".05em"}}>✅ LÍQUIDO</div>
+              <div style={{fontSize:"10px", color:"#166534"}}>o que cai na conta</div>
+            </div>
+            <div style={{fontFamily:"monospace", fontWeight:900,
+              fontSize:"clamp(18px, 6vw, 24px)", color:"#10b981", whiteSpace:"nowrap"}}>
+              {fmt(calc.liq)}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Métricas ── */}
+        <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"8px", marginBottom:"10px"}}>
+          {[
+            {l:"Hora Diurna",  v:fmt(calc.vH),    c:"#7dd3fc"},
+            {l:"Hora Noturna", v:fmt(calc.vHNot),  c:"#c4b5fd"},
+          ].map(({l,v,c})=>(
+            <div key={l} style={{
+              background:"#0f172a", borderRadius:"10px",
+              padding:"13px 12px", textAlign:"center", border:"1px solid #1e293b",
+            }}>
+              <div style={{fontSize:"10px", color:"#475569", marginBottom:"5px"}}>{l}</div>
+              <div style={{fontFamily:"monospace", fontWeight:700, color:c, fontSize:"15px"}}>
+                {v}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* ── Calendário ── */}
+        <div style={card()}>
+          <p style={sec}>📅 Calendário de Pagamento</p>
+
+          {[
+            {dia:"25", titulo:"FECHAMENTO",   sub:"folha fecha",       val:null,      bg:"#1e1b4b", bord:"#4f46e5", cor:"#818cf8"},
+            {dia:"15", titulo:"ADIANTAMENTO", sub:"40% do sal. base",  val:calc.v15,  bg:"#150f00", bord:"#d97706", cor:"#f59e0b", valCor:"#fbbf24"},
+            {dia:"30", titulo:"SALDO FINAL",  sub:"líquido − adiant.", val:calc.v30,  bg:"#031510", bord:"#059669", cor:"#10b981", valCor:"#10b981"},
+          ].map(({dia,titulo,sub,val,bg,bord,cor,valCor},i)=>(
+            <div key={dia} style={{
+              padding:"14px 0",
+              borderBottom: i<2?"1px solid #1e293b":"none",
+            }}>
+              <div style={{display:"flex", alignItems:"center", gap:"12px"}}>
+                {/* Número do dia */}
+                <div style={{
+                  minWidth:"54px", height:"54px", borderRadius:"12px",
+                  background:bg, border:`2px solid ${bord}`,
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  fontSize:"22px", fontWeight:900, color:cor, fontFamily:"monospace",
+                  flexShrink:0,
+                }}>{dia}</div>
+
+                {/* Título + subtítulo */}
+                <div style={{flex:1, minWidth:0}}>
+                  <div style={{fontSize:"12px", fontWeight:800, color:cor,
+                    letterSpacing:".06em"}}>{titulo}</div>
+                  <div style={{fontSize:"11px", color:"#475569", marginTop:"2px"}}>{sub}</div>
+                </div>
+              </div>
+
+              {/* Valor abaixo, para não cortar */}
+              {val !== null && (
+                <div style={{
+                  marginTop:"10px", marginLeft:"66px",
+                  fontFamily:"monospace", fontWeight:800,
+                  fontSize:"clamp(16px, 5vw, 20px)", color:valCor,
+                }}>
+                  {fmt(val)}
+                </div>
+              )}
+            </div>
+          ))}
+
+          {/* Barra proporcional */}
+          {calc.liq > 0 && (()=>{
+            const p = Math.min(100, Math.round(calc.v15/calc.liq*100));
+            return (
+              <div style={{marginTop:"6px"}}>
+                <div style={{height:"8px", background:"#1e293b",
+                  borderRadius:"999px", overflow:"hidden", display:"flex"}}>
+                  <div style={{width:`${p}%`,
+                    background:"linear-gradient(90deg,#d97706,#fbbf24)"}}/>
+                  <div style={{flex:1,
+                    background:"linear-gradient(90deg,#059669,#10b981)"}}/>
+                </div>
+                <div style={{display:"flex", justifyContent:"space-between",
+                  marginTop:"6px", gap:"8px"}}>
+                  <span style={{fontSize:"11px", color:"#92400e"}}>
+                    Dia 15: {fmt(calc.v15)} ({p}%)
+                  </span>
+                  <span style={{fontSize:"11px", color:"#065f46", textAlign:"right"}}>
+                    Dia 30: {fmt(calc.v30)} ({100-p}%)
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+
+        {/* ── Custo Empresa ── */}
+        <div style={{
+          background:"#0a0f1e", borderRadius:"14px",
+          marginBottom:"10px", border:"1px solid #1e2d40", overflow:"hidden",
+        }}>
+          <button onClick={()=>setShowEmp(v=>!v)} style={{
+            width:"100%", background:"none", border:"none", cursor:"pointer",
+            padding:"16px", display:"flex", justifyContent:"space-between",
+            alignItems:"center", gap:"8px",
+          }}>
+            <div style={{textAlign:"left", flex:1, minWidth:0}}>
+              <div style={{fontSize:"13px", fontWeight:700, color:"#7dd3fc"}}>
+                🏢 Custo Real para a Empresa
+              </div>
+              <div style={{fontSize:"11px", color:"#334155", marginTop:"2px"}}>
+                FGTS · Encargos · Provisões — só para conhecimento
+              </div>
+            </div>
+            <div style={{
+              background:"#1e293b", borderRadius:"6px", padding:"5px 10px",
+              fontSize:"11px", color:"#7dd3fc", fontFamily:"monospace",
+              whiteSpace:"nowrap", flexShrink:0,
+            }}>
+              {showEmp?"▲":"▼"}
+            </div>
+          </button>
+
+          {showEmp && (
+            <div style={{padding:"0 16px 16px"}}>
+              <div style={{
+                background:"#0c1a2e", border:"1px solid #1e3a5f", borderRadius:"8px",
+                padding:"10px 12px", fontSize:"11px", color:"#64748b",
+                marginBottom:"12px", lineHeight:1.6,
+              }}>
+                ⚠️ Esses valores <strong style={{color:"#7dd3fc"}}>não saem do seu salário</strong>. A empresa paga por fora. O FGTS vai para uma conta no seu nome na Caixa.
+              </div>
+
+              <p style={{...sec, margin:"0 0 8px"}}>Encargos mensais</p>
+
+              {[
+                {l:"FGTS",         d:"8% do bruto",    v:calc.fgts,    tag:"seu direito", tc:"#10b981"},
+                {l:"INSS Patronal",d:"20% do bruto",   v:calc.inssPat, tag:"empresa",     tc:"#f59e0b"},
+                {l:"RAT/SAT",      d:"~2% do bruto",   v:calc.rat,     tag:"empresa",     tc:"#f59e0b"},
+                {l:"Sistema S",    d:"~5,8%",          v:calc.sistS,   tag:"empresa",     tc:"#f59e0b"},
+              ].map(({l,d,v,tag,tc},i,arr)=>(
+                <div key={l} style={{
+                  display:"flex", justifyContent:"space-between", alignItems:"center",
+                  padding:"10px 0",
+                  borderBottom:i<arr.length-1?"1px solid #1e293b":"none",
+                  gap:"8px",
+                }}>
+                  <div style={{flex:1, minWidth:0}}>
+                    <div style={{fontSize:"13px"}}>
+                      {l}<span style={pill(tc)}>{tag}</span>
+                    </div>
+                    <div style={{fontSize:"10px", color:"#334155", marginTop:"2px"}}>{d}</div>
+                  </div>
+                  <div style={{fontFamily:"monospace", fontWeight:700,
+                    color:"#7dd3fc", fontSize:"13px", whiteSpace:"nowrap"}}>
+                    {fmt(v)}
+                  </div>
+                </div>
+              ))}
+
+              <div style={{
+                display:"flex", justifyContent:"space-between",
+                padding:"10px 12px", background:"#0c1a2e", borderRadius:"8px",
+                margin:"6px 0", border:"1px solid #1e3a5f", gap:"8px",
+              }}>
+                <span style={{fontWeight:700, fontSize:"13px"}}>Subtotal encargos</span>
+                <span style={{fontFamily:"monospace", fontWeight:700,
+                  color:"#7dd3fc", fontSize:"13px", whiteSpace:"nowrap"}}>
+                  {fmt(calc.totalEnc)}
+                </span>
+              </div>
+
+              <p style={{...sec, margin:"12px 0 8px"}}>Provisões mensais</p>
+
+              {[
+                {l:"13º Salário",    d:"8,33%/mês · 1/12",          v:calc.prov13},
+                {l:"Férias + ⅓",    d:"11,11%/mês · 30d + 1/3",    v:calc.provFer},
+              ].map(({l,d,v},i,arr)=>(
+                <div key={l} style={{
+                  display:"flex", justifyContent:"space-between", alignItems:"center",
+                  padding:"10px 0",
+                  borderBottom:i<arr.length-1?"1px solid #1e293b":"none",
+                  gap:"8px",
+                }}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:"13px"}}>{l}</div>
+                    <div style={{fontSize:"10px", color:"#334155", marginTop:"2px"}}>{d}</div>
+                  </div>
+                  <div style={{fontFamily:"monospace", fontWeight:700,
+                    color:"#fbbf24", fontSize:"13px", whiteSpace:"nowrap"}}>
+                    {fmt(v)}
+                  </div>
+                </div>
+              ))}
+
+              <div style={{
+                display:"flex", justifyContent:"space-between",
+                padding:"10px 12px", background:"#150f00", borderRadius:"8px",
+                margin:"6px 0", border:"1px solid #78350f", gap:"8px",
+              }}>
+                <span style={{fontWeight:700, fontSize:"13px"}}>Subtotal provisões</span>
+                <span style={{fontFamily:"monospace", fontWeight:700,
+                  color:"#fbbf24", fontSize:"13px", whiteSpace:"nowrap"}}>
+                  {fmt(calc.totalProv)}
+                </span>
+              </div>
+
+              {/* Total */}
+              <div style={{
+                padding:"14px", background:"#071020", borderRadius:"12px",
+                marginTop:"12px", border:"2px solid #1e3a5f",
+              }}>
+                <div style={{fontSize:"11px", color:"#475569", marginBottom:"6px"}}>
+                  Custo total para a empresa
+                </div>
+                <div style={{fontFamily:"monospace", fontWeight:900,
+                  fontSize:"clamp(18px,6vw,22px)", color:"#7dd3fc"}}>
+                  {fmt(calc.custo)}
+                </div>
+              </div>
+
+              <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"8px", marginTop:"10px"}}>
+                {[
+                  {l:"Você recebe", v:fmt(calc.liq),  c:"#10b981"},
+                  {l:"Empresa gasta", v:fmt(calc.custo), c:"#7dd3fc"},
+                ].map(({l,v,c})=>(
+                  <div key={l} style={{background:"#0f172a", borderRadius:"8px",
+                    padding:"12px", textAlign:"center", border:"1px solid #1e293b"}}>
+                    <div style={{fontSize:"10px", color:"#475569", marginBottom:"4px"}}>{l}</div>
+                    <div style={{fontFamily:"monospace", fontWeight:700,
+                      color:c, fontSize:"13px", wordBreak:"break-all"}}>{v}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+      </>) : (
+        <div style={{
+          textAlign:"center", padding:"44px 16px",
+          background:"#0f172a", borderRadius:"14px",
+          border:"1px dashed #1e293b", color:"#334155",
+        }}>
+          <div style={{fontSize:"42px", marginBottom:"10px"}}>💰</div>
+          <div style={{fontSize:"14px"}}>Preencha o salário acima para calcular</div>
+        </div>
+      )}
+
+      <p style={{
+        fontSize:"10px", color:"#1e293b", textAlign:"center",
+        lineHeight:1.6, marginTop:"4px",
+      }}>
+        Estimativa · CLT Art. 73 · INSS 2026 · IRRF + Lei 15.270/2025
+        <br/>Consulte seu DP/RH para valores exatos
+      </p>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+  </script>
+
+  <!-- Service Worker (PWA offline) -->
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js").catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>
