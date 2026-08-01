@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
   <meta name="theme-color" content="#060a14" />
   <meta name="description" content="Calculadora de salário CLT para turno noturno 18h-06h. Adicional noturno, periculosidade, horas extras, INSS e IRRF 2026." />
   <title>Calculadora CLT Noturna</title>
@@ -21,6 +21,11 @@
 
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html {
+      -webkit-text-size-adjust: 100%;
+      -moz-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
     html, body { background: #060a14; -webkit-tap-highlight-color: transparent; }
     body { font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; }
     input[type=number]::-webkit-inner-spin-button,
@@ -28,8 +33,11 @@
     input[type=number] { -moz-appearance: textfield; }
     #root { min-height: 100vh; }
     .loading { display:flex; align-items:center; justify-content:center; min-height:100vh; color:#475569; font-size:14px; }
-    /* Impede zoom automático no mobile ao focar inputs (precisa ser >=16px) */
-    input, select, textarea { font-size: 16px !important; }
+    /* Impede zoom automático no mobile ao focar inputs — 16px+ é o mínimo seguro */
+    input, select, textarea, button {
+      font-size: 16px !important;
+      touch-action: manipulation;
+    }
   </style>
 </head>
 <body>
